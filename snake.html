@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Snake — Retro Terminal</title>
+<link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #0a0a0a;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    font-family: 'VT323', monospace;
+    overflow: hidden;
+  }
+
+  #monitor {
+    position: relative;
+    background: #111;
+    border: 8px solid #222;
+    border-radius: 18px;
+    box-shadow: 0 0 40px rgba(0,255,65,0.15), inset 0 0 80px rgba(0,0,0,0.6);
+    padding: 20px;
+  }
+
+  /* CRT scanlines */
+  #monitor::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      rgba(0,0,0,0.12) 0px,
+      rgba(0,0,0,0.12) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+    pointer-events: none;
+    border-radius: 10px;
+    z-index: 10;
+  }
+
+  /* CRT flicker */
+  @keyframes flicker {
+    0%   { opacity: 0.97; }
+    50%  { opacity: 1; }
+    100% { opacity: 0.98; }
+  }
+
+  #screen {
+    position: relative;
+    animation: flicker 0.1s infinite;
+  }
+
+  #hud {
+    display: flex;
+    justify-content: space-between;
+    color: #00ff41;
+    font-size: 22px;
+    padding: 4px 2px 8px;
+    text-shadow: 0 0 8px #00ff41;
+  }
+
+  canvas {
+    display: block;
+    background: #0d1a0d;
+    border: 2px solid #00ff41;
+    box-shadow: 0 0 12px rgba(0,255,65,0.2);
+    image-rendering: pixelated;
+  }
+
+  #message {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    color: #00ff41;
+    text-shadow: 0 0 12px #00ff41;
+    font-size: 28px;
+    z-index: 5;
+    background: rgba(0,0,0,0.7);
+    display: none;
+    line-height: 1.6;
+    text-align: center;
+    padding: 20px;
+  }
+
+  #message.visible { display: flex; }
+
+  #message .sub {
+    font-size: 18px;
+    margin-top: 8px;
+    opacity: 0.7;
+  }
+
+  /* Touch controls */
+  #touch-controls {
+    display: none;
+    margin-top: 16px;
+    gap: 4px;
+  }
+
+  #touch-controls button {
+    width: 60px;
+    height: 60px;
+    font-family: 'VT323', monospace;
+    font-size: 28px;
+    background: #1a1a1a;
+    color: #00ff41;
+    border: 2px solid #00ff41;
+    border-radius: 8px;
+    cursor: pointer;
+    text-shadow: 0 0 6px #00ff41;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+
+  #touch-controls button:active {
+    background: #00ff41;
+    color: #0a0a0a;
+  }
+
+  @media (pointer: coarse) {
+    #touch-controls { display: grid; grid-template-columns: repeat(3, 60px); grid-template-rows: repeat(2, 60px); justify-content: center; }
+  }
+</style>
+</head>
+<body>
+
+<div id="monitor">
+  <div id="screen">
+    <div id="hud">
+      <span id="hud-score">SCORE: 0</span>
+      <span id="hud-level">LVL: 1</span>
+      <span id="hud-hi">HI: 0</span>
+    </div>
+    <canvas id="game"></canvas>
+    <div id="message">
+      <div id="msg-title">SNAKE</div>
+      <div id="msg-body" class="sub"></div>
+    </div>
+  </div>
+  <div id="touch-controls">
+    <div></div>
+    <button data-dir="up">&#9650;</button>
+    <div></div>
+    <button data-dir="left">&#9664;</button>
+    <button data-dir="down">&#9660;</button>
+    <button data-dir="right">&#9654;</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  // --- Config ---
+  const COLS = 22, ROWS = 22, TILE = 20;
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  canvas.width = COLS * TILE;
+  canvas.height = ROWS * TILE;
+
+  const hudScore = document.getElementById('hud-score');
+  const hudLevel = document.getElementById('hud-level');
+  const hudHi    = document.getElementById('hud-hi');
+  const msgEl    = document.getElementById('message');
+  const msgTitle = document.getElementById('msg-title');
+  const msgBody  = document.getElementById('msg-body');
+
+  // --- State ---
+  let snake, dir, nextDir, food, score, level, speed, hiScore, alive, started, loopId;
+
+  hiScore = parseInt(localStorage.getItem('snake_hi') || '0', 10);
+  hudHi.textContent = 'HI: ' + hiScore;
+
+  const LEVEL_THRESHOLDS = [0, 50, 120, 220, 350, 500, 700, 950, 1250, 1600];
+  const BASE_SPEED = 150;
+  const SPEED_STEP = 12;
+
+  function init() {
+    snake = [{ x: Math.floor(COLS / 2), y: Math.floor(ROWS / 2) }];
+    dir = { x: 1, y: 0 };
+    nextDir = { ...dir };
+    score = 0;
+    level = 1;
+    speed = BASE_SPEED;
+    alive = true;
+    started = true;
+    placeFood();
+    updateHUD();
+    hideMessage();
+    clearInterval(loopId);
+    loopId = setInterval(tick, speed);
+  }
+
+  function placeFood() {
+    let pos;
+    do {
+      pos = { x: Math.floor(Math.random() * COLS), y: Math.floor(Math.random() * ROWS) };
+    } while (snake.some(s => s.x === pos.x && s.y === pos.y));
+    food = pos;
+  }
+
+  function tick() {
+    if (!alive) return;
+
+    dir = { ...nextDir };
+    const head = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
+
+    // Wall collision
+    if (head.x < 0 || head.x >= COLS || head.y < 0 || head.y >= ROWS) return die();
+    // Self collision
+    if (snake.some(s => s.x === head.x && s.y === head.y)) return die();
+
+    snake.unshift(head);
+
+    if (head.x === food.x && head.y === food.y) {
+      score += 10 * level;
+      checkLevel();
+      placeFood();
+      updateHUD();
+    } else {
+      snake.pop();
+    }
+
+    draw();
+  }
+
+  function checkLevel() {
+    for (let i = LEVEL_THRESHOLDS.length - 1; i >= 0; i--) {
+      if (score >= LEVEL_THRESHOLDS[i]) {
+        if (i + 1 > level) {
+          level = i + 1;
+          speed = Math.max(40, BASE_SPEED - (level - 1) * SPEED_STEP);
+          clearInterval(loopId);
+          loopId = setInterval(tick, speed);
+        }
+        break;
+      }
+    }
+  }
+
+  function die() {
+    alive = false;
+    clearInterval(loopId);
+    if (score > hiScore) {
+      hiScore = score;
+      localStorage.setItem('snake_hi', hiScore);
+      hudHi.textContent = 'HI: ' + hiScore;
+    }
+    showMessage('GAME OVER', 'Score: ' + score + '  Level: ' + level + '\nPress any key or tap to restart');
+  }
+
+  function updateHUD() {
+    hudScore.textContent = 'SCORE: ' + score;
+    hudLevel.textContent = 'LVL: ' + level;
+  }
+
+  // --- Drawing ---
+  function draw() {
+    ctx.fillStyle = '#0d1a0d';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Grid dots
+    ctx.fillStyle = 'rgba(0,255,65,0.04)';
+    for (let x = 0; x < COLS; x++)
+      for (let y = 0; y < ROWS; y++)
+        ctx.fillRect(x * TILE + TILE / 2 - 1, y * TILE + TILE / 2 - 1, 2, 2);
+
+    // Snake
+    snake.forEach((s, i) => {
+      const brightness = i === 0 ? 1 : Math.max(0.35, 1 - i * 0.03);
+      ctx.fillStyle = `rgba(0,${Math.floor(255 * brightness)},${Math.floor(65 * brightness)},${brightness})`;
+      ctx.shadowColor = '#00ff41';
+      ctx.shadowBlur = i === 0 ? 10 : 4;
+      ctx.fillRect(s.x * TILE + 1, s.y * TILE + 1, TILE - 2, TILE - 2);
+      ctx.shadowBlur = 0;
+    });
+
+    // Food
+    const pulse = 0.7 + 0.3 * Math.sin(Date.now() / 150);
+    ctx.fillStyle = `rgba(255,${Math.floor(80 * pulse)},80,${pulse})`;
+    ctx.shadowColor = '#ff5050';
+    ctx.shadowBlur = 10;
+    ctx.beginPath();
+    ctx.arc(food.x * TILE + TILE / 2, food.y * TILE + TILE / 2, TILE / 2 - 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  function showMessage(title, body) {
+    msgTitle.textContent = title;
+    msgBody.textContent = body;
+    msgEl.classList.add('visible');
+  }
+
+  function hideMessage() {
+    msgEl.classList.remove('visible');
+  }
+
+  // --- Input ---
+  const DIR_MAP = {
+    ArrowUp:    { x: 0, y:-1 }, w: { x: 0, y:-1 }, W: { x: 0, y:-1 },
+    ArrowDown:  { x: 0, y: 1 }, s: { x: 0, y: 1 }, S: { x: 0, y: 1 },
+    ArrowLeft:  { x:-1, y: 0 }, a: { x:-1, y: 0 }, A: { x:-1, y: 0 },
+    ArrowRight: { x: 1, y: 0 }, d: { x: 1, y: 0 }, D: { x: 1, y: 0 },
+  };
+
+  document.addEventListener('keydown', e => {
+    if (!started || !alive) { init(); return; }
+    const nd = DIR_MAP[e.key];
+    if (nd && (nd.x + dir.x !== 0 || nd.y + dir.y !== 0)) {
+      nextDir = nd;
+      e.preventDefault();
+    }
+  });
+
+  // Touch controls
+  document.querySelectorAll('#touch-controls button').forEach(btn => {
+    btn.addEventListener('touchstart', e => {
+      e.preventDefault();
+      if (!started || !alive) { init(); return; }
+      const d = btn.dataset.dir;
+      const nd = { up:{x:0,y:-1}, down:{x:0,y:1}, left:{x:-1,y:0}, right:{x:1,y:0} }[d];
+      if (nd && (nd.x + dir.x !== 0 || nd.y + dir.y !== 0)) nextDir = nd;
+    });
+  });
+
+  // Swipe support
+  let touchStart = null;
+  canvas.addEventListener('touchstart', e => {
+    if (!started || !alive) { init(); return; }
+    touchStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    e.preventDefault();
+  }, { passive: false });
+
+  canvas.addEventListener('touchmove', e => {
+    if (!touchStart) return;
+    const dx = e.touches[0].clientX - touchStart.x;
+    const dy = e.touches[0].clientY - touchStart.y;
+    if (Math.abs(dx) < 20 && Math.abs(dy) < 20) return;
+    let nd;
+    if (Math.abs(dx) > Math.abs(dy)) nd = dx > 0 ? { x:1,y:0 } : { x:-1,y:0 };
+    else nd = dy > 0 ? { x:0,y:1 } : { x:0,y:-1 };
+    if (nd.x + dir.x !== 0 || nd.y + dir.y !== 0) nextDir = nd;
+    touchStart = null;
+    e.preventDefault();
+  }, { passive: false });
+
+  // --- Start screen ---
+  showMessage('SNAKE', 'WASD / Arrow Keys / Swipe\nPress any key or tap to start');
+  draw = draw; // ensure draw is defined before first call
+
+  // Initial draw of empty board
+  ctx.fillStyle = '#0d1a0d';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+})();
+</script>
+</body>
+</html>
